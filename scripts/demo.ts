@@ -193,6 +193,63 @@ async function balance(
   return account.amount;
 }
 
+const FEE_DENOMINATOR = 10_000n;
+const MINIMUM_LIQUIDITY = 1_000n;
+// Callers must bound their own slippage; 99% of the quote leaves room for a
+// competing transaction landing first without accepting an arbitrary price.
+const SLIPPAGE_BPS = 9_900n;
+
+function bounded(amount: bigint): BN {
+  return new BN(((amount * SLIPPAGE_BPS) / FEE_DENOMINATOR).toString());
+}
+
+function integerSqrt(value: bigint): bigint {
+  if (value < 2n) {
+    return value;
+  }
+  let root = value;
+  let next = (root + 1n) / 2n;
+  while (next < root) {
+    root = next;
+    next = (root + value / root) / 2n;
+  }
+  return root;
+}
+
+function quoteInitialLp(amountA: bigint, amountB: bigint): bigint {
+  return integerSqrt(amountA * amountB) - MINIMUM_LIQUIDITY;
+}
+
+function quoteSwapOut(
+  amountIn: bigint,
+  reserveIn: bigint,
+  reserveOut: bigint,
+  feeBps: bigint,
+): bigint {
+  const inWithFee = amountIn * (FEE_DENOMINATOR - feeBps);
+  return (inWithFee * reserveOut) / (reserveIn * FEE_DENOMINATOR + inWithFee);
+}
+
+function quoteRemoveOut(
+  lpAmount: bigint,
+  reserve: bigint,
+  lpSupply: bigint,
+): bigint {
+  return (lpAmount * reserve) / lpSupply;
+}
+
+async function reserves(
+  program: Program<Amm>,
+  pool: PublicKey,
+): Promise<{ a: bigint; b: bigint; feeBps: bigint }> {
+  const state = await program.account.pool.fetch(pool);
+  return {
+    a: BigInt(state.reserveA.toString()),
+    b: BigInt(state.reserveB.toString()),
+    feeBps: BigInt(state.feeBps),
+  };
+}
+
 function format(amount: bigint | BN): string {
   const value = typeof amount === "bigint" ? amount : BigInt(amount.toString());
   const whole = value / BigInt(UNIT);
@@ -376,15 +433,18 @@ async function main(): Promise<void> {
     tokenProgram: TOKEN_2022_PROGRAM_ID,
   };
 
+  // The first deposit is taken exactly as offered, so its minimums are exact.
+  const depositA = 200_000n * BigInt(UNIT);
+  const depositB = 200_000n * BigInt(UNIT);
   record(
     "add liquidity",
     await amm.methods
       .addLiquidity(
-        new BN(200_000).muln(UNIT),
-        new BN(200_000).muln(UNIT),
-        new BN(0),
-        new BN(0),
-        new BN(0),
+        new BN(depositA.toString()),
+        new BN(depositB.toString()),
+        new BN(depositA.toString()),
+        new BN(depositB.toString()),
+        bounded(quoteInitialLp(depositA, depositB)),
       )
       .accountsPartial(liquidityAccounts)
       .rpc(),
@@ -407,26 +467,47 @@ async function main(): Promise<void> {
     tokenProgram: TOKEN_2022_PROGRAM_ID,
   };
 
+  const swapAtoB = 10_000n * BigInt(UNIT);
+  let live = await reserves(amm, pool);
   record(
     "swap A to B",
     await amm.methods
-      .swap({ atoB: {} }, new BN(10_000).muln(UNIT), new BN(0))
-      .accountsPartial(swapAccounts)
-      .rpc(),
-  );
-  record(
-    "swap B to A",
-    await amm.methods
-      .swap({ btoA: {} }, new BN(5_000).muln(UNIT), new BN(0))
+      .swap(
+        { atoB: {} },
+        new BN(swapAtoB.toString()),
+        bounded(quoteSwapOut(swapAtoB, live.a, live.b, live.feeBps)),
+      )
       .accountsPartial(swapAccounts)
       .rpc(),
   );
 
-  const heldLp = await balance(provider, userLp);
+  const swapBtoA = 5_000n * BigInt(UNIT);
+  live = await reserves(amm, pool);
+  record(
+    "swap B to A",
+    await amm.methods
+      .swap(
+        { btoA: {} },
+        new BN(swapBtoA.toString()),
+        bounded(quoteSwapOut(swapBtoA, live.b, live.a, live.feeBps)),
+      )
+      .accountsPartial(swapAccounts)
+      .rpc(),
+  );
+
+  const burnedLp = (await balance(provider, userLp)) / 2n;
+  live = await reserves(amm, pool);
+  const lpSupply = (
+    await getMint(connection, lpMint, undefined, TOKEN_2022_PROGRAM_ID)
+  ).supply;
   record(
     "remove liquidity",
     await amm.methods
-      .removeLiquidity(new BN((heldLp / 2n).toString()), new BN(0), new BN(0))
+      .removeLiquidity(
+        new BN(burnedLp.toString()),
+        bounded(quoteRemoveOut(burnedLp, live.a, lpSupply)),
+        bounded(quoteRemoveOut(burnedLp, live.b, lpSupply)),
+      )
       .accountsPartial(liquidityAccounts)
       .rpc(),
   );

@@ -34,7 +34,7 @@ pub enum StablecoinError {
     WalletNotAllowed,
     #[msg("protocol is paused")]
     ProtocolPaused,
-    #[msg("total minted minus total burned does not match mint supply")]
+    #[msg("tracked outstanding supply is below the live mint supply")]
     CounterInvariantViolation,
     #[msg("token account does not belong to this mint")]
     TokenAccountMintMismatch,

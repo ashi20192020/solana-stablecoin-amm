@@ -5,7 +5,8 @@ use anchor_spl::{
 };
 
 use crate::{
-    constants::CONFIG_SEED, errors::StablecoinError, events::TokensBurned, state::MintConfig,
+    constants::CONFIG_SEED, errors::StablecoinError, events::TokensBurned,
+    instructions::ensure_supply_tracked, state::MintConfig,
 };
 
 #[derive(Accounts)]
@@ -40,10 +41,7 @@ pub(crate) fn handler(ctx: Context<Burn>, amount: u64) -> Result<()> {
 
     let config = &ctx.accounts.config;
     let supply = ctx.accounts.mint.supply;
-    require!(
-        config.total_minted.checked_sub(config.total_burned) == Some(u128::from(supply)),
-        StablecoinError::CounterInvariantViolation
-    );
+    ensure_supply_tracked(config, supply)?;
 
     let total_burned = config
         .total_burned
@@ -74,6 +72,7 @@ pub(crate) fn handler(ctx: Context<Burn>, amount: u64) -> Result<()> {
     );
 
     ctx.accounts.config.total_burned = total_burned;
+    ensure_supply_tracked(&ctx.accounts.config, new_supply)?;
 
     emit!(TokensBurned {
         mint: ctx.accounts.mint.key(),

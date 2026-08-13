@@ -5,6 +5,7 @@ use crate::{
     constants::{CONFIG_SEED, MAX_SUPPLY_CAP},
     errors::StablecoinError,
     events::ConfigUpdated,
+    instructions::ensure_supply_tracked,
     state::MintConfig,
 };
 
@@ -41,11 +42,7 @@ pub(crate) fn handler(
         require!(cap <= MAX_SUPPLY_CAP, StablecoinError::SupplyCapTooLarge);
 
         let supply = ctx.accounts.mint.supply;
-        let config = &ctx.accounts.config;
-        require!(
-            config.total_minted.checked_sub(config.total_burned) == Some(u128::from(supply)),
-            StablecoinError::CounterInvariantViolation
-        );
+        ensure_supply_tracked(&ctx.accounts.config, supply)?;
         require!(cap >= supply, StablecoinError::SupplyCapBelowSupply);
 
         ctx.accounts.config.supply_cap = cap;

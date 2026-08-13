@@ -16,7 +16,7 @@ use anchor_spl::token_2022::{
             pausable::{PausableAccount, PausableConfig},
             BaseStateWithExtensions, ExtensionType, StateWithExtensions,
         },
-        instruction::initialize_account3,
+        instruction::{burn_checked, initialize_account3},
         state::{Account as TokenAccountState, AccountState, Mint as MintState},
     },
     ID as TOKEN_2022_ID,
@@ -413,6 +413,23 @@ impl World {
         self.send(&[instruction], &[]).expect("minting failed");
     }
 
+    /// Burns straight through token-2022, bypassing this program entirely.
+    fn direct_burn(&mut self, actor: usize, mint: Pubkey, token_account: Pubkey, amount: u64) {
+        let owner = self.actors[actor].keypair.insecure_clone();
+        let instruction = burn_checked(
+            &TOKEN_2022_ID,
+            &token_account,
+            &mint,
+            &owner.pubkey(),
+            &[],
+            amount,
+            DECIMALS,
+        )
+        .expect("burn_checked build failed");
+        self.send(&[instruction], &[&owner])
+            .expect("direct burn failed");
+    }
+
     fn set_pause(&mut self, mint: Pubkey, paused: bool) -> TxResult {
         let instruction = Instruction::new_with_bytes(
             stablecoin::id(),
@@ -625,11 +642,10 @@ impl World {
 
             assert!(state.supply <= stored.supply_cap);
             assert!(stored.supply_cap <= MAX_SUPPLY_CAP);
+            // Owners may burn thawed balances through token-2022 without this program,
+            // so tracked outstanding supply only bounds the live supply from above.
             assert!(stored.total_minted >= stored.total_burned);
-            assert_eq!(
-                stored.total_minted - stored.total_burned,
-                u128::from(state.supply)
-            );
+            assert!(stored.total_minted - stored.total_burned >= u128::from(state.supply));
             assert_eq!(Option::from(state.mint_authority), Some(config));
             assert_eq!(Option::from(state.freeze_authority), Some(config));
 
@@ -747,11 +763,39 @@ fn deterministic_operation_sequence_preserves_every_invariant() {
     let mut succeeded = 0usize;
     let mut rejected = 0usize;
     let mut deliberate_rejections = 0usize;
+    let mut direct_burns = 0usize;
     let mut swaps = 0usize;
     let mut withdrawals = 0usize;
     let mut codes: Vec<Option<u32>> = Vec::new();
 
-    for _ in 0..OPERATIONS {
+    for index in 0..OPERATIONS {
+        // Midway through, an owner burns through token-2022 directly. The program never
+        // sees it, so its counters must not move while the live supply drops.
+        if index == OPERATIONS / 2 {
+            let (mint, token_account) = (world.mint_a, world.actors[0].token_a);
+            if world.paused_a {
+                world.set_pause(mint, false).expect("resume failed");
+                world.paused_a = false;
+            }
+            if !world.actors[0].allowed_a {
+                world
+                    .set_policy(mint, token_account, PolicyStatus::Allowed)
+                    .expect("unblocking failed");
+                world.actors[0].allowed_a = true;
+            }
+            let before = world.snapshot();
+            let amount = before.balances[0].0 / 4;
+            assert!(amount > 0, "the owner needs a balance to burn");
+            world.direct_burn(0, mint, token_account, amount);
+            let after = world.snapshot();
+            assert_eq!(after.supply_a, before.supply_a - amount);
+            assert_eq!(after.balances[0].0, before.balances[0].0 - amount);
+            assert_eq!(after.counters_a, before.counters_a);
+            direct_burns += 1;
+            world.check_invariants();
+            continue;
+        }
+
         let before = world.snapshot();
         let actor = usize::try_from(rng.below(ACTORS as u64)).expect("actor index fits");
         let choice = rng.below(10);
@@ -924,6 +968,7 @@ fn deterministic_operation_sequence_preserves_every_invariant() {
     }
 
     assert!(swaps > 0 && withdrawals > 0 && deliberate_rejections > 0);
+    assert!(direct_burns > 0);
     assert!(succeeded > 0 && rejected > 0);
     assert!(
         succeeded + rejected >= 128,
@@ -932,7 +977,8 @@ fn deterministic_operation_sequence_preserves_every_invariant() {
     );
     println!(
         "attempted={} succeeded={succeeded} rejected={rejected} swaps={swaps} \
-         withdrawals={withdrawals} deliberate_rejections={deliberate_rejections}",
+         withdrawals={withdrawals} deliberate_rejections={deliberate_rejections} \
+         direct_burns={direct_burns}",
         succeeded + rejected
     );
     assert!(

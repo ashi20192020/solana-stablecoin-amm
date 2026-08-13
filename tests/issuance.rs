@@ -10,7 +10,7 @@ use anchor_spl::token_2022::{
     spl_token_2022::{
         error::TokenError,
         extension::{ExtensionType, StateWithExtensions},
-        instruction::{initialize_account3, transfer_checked},
+        instruction::{burn_checked, initialize_account3, transfer_checked},
         state::{Account as TokenAccountState, AccountState, Mint as MintState},
     },
     ID as TOKEN_2022_ID,
@@ -445,12 +445,17 @@ impl Env {
             == AccountState::Frozen
     }
 
+    /// Direct token-2022 burns are invisible to the program counters, so tracked
+    /// outstanding supply is an upper bound on the live supply rather than an equality.
     fn assert_supply_invariant(&self) {
         let config = self.config_state();
-        assert_eq!(
-            config.total_minted - config.total_burned,
-            u128::from(self.supply()),
-            "total_minted - total_burned must equal mint supply"
+        let outstanding = config
+            .total_minted
+            .checked_sub(config.total_burned)
+            .expect("total_burned must never exceed total_minted");
+        assert!(
+            outstanding >= u128::from(self.supply()),
+            "total_minted - total_burned must be at least the mint supply"
         );
     }
 }
@@ -1064,8 +1069,22 @@ fn broken_supply_counters_block_issuance() {
     env.mint_to(&minter, &token_account, 1_000)
         .expect("minting must succeed");
 
-    env.patch_config(|config| config.total_minted += 1);
+    // Burning more than was ever issued underflows the tracked outstanding supply.
+    env.patch_config(|config| config.total_burned = config.total_minted + 1);
+    expect_error(
+        env.mint_to(&minter, &token_account, 1),
+        StablecoinError::CounterInvariantViolation,
+    );
+    expect_error(
+        env.burn(&owner, &token_account, 1),
+        StablecoinError::CounterInvariantViolation,
+    );
 
+    // Tracked outstanding supply below the live supply is equally inconsistent.
+    env.patch_config(|config| {
+        config.total_minted = 999;
+        config.total_burned = 0;
+    });
     expect_error(
         env.mint_to(&minter, &token_account, 1),
         StablecoinError::CounterInvariantViolation,
@@ -1230,4 +1249,69 @@ fn a_rejected_mint_emits_no_event_and_changes_nothing() {
     assert_eq!(after.total_minted, before.total_minted);
     assert_eq!(env.supply(), 0);
     assert_eq!(env.balance(&destination), 0);
+}
+
+#[test]
+fn a_direct_token_2022_burn_leaves_the_program_counters_untouched() {
+    let mut env = Env::new();
+    let (owner, token_account) = env.allowed_account();
+    let minter = env.minter(ALLOWANCE);
+    env.mint_to(&minter, &token_account, 10_000)
+        .expect("minting must succeed");
+
+    let before = env.config_state();
+    let instruction = burn_checked(
+        &TOKEN_2022_ID,
+        &token_account,
+        &env.mint,
+        &owner.pubkey(),
+        &[],
+        4_000,
+        DECIMALS,
+    )
+    .expect("burn_checked build failed");
+    env.send(&[instruction], &[&owner])
+        .expect("an owner may burn a thawed balance through token-2022");
+
+    assert_eq!(env.supply(), 6_000);
+    assert_eq!(env.balance(&token_account), 6_000);
+    let after = env.config_state();
+    assert_eq!(after.total_minted, before.total_minted);
+    assert_eq!(after.total_burned, before.total_burned);
+    assert!(env.events::<TokensBurned>().is_empty());
+
+    // The slack the direct burn opened must not block program-mediated operations.
+    env.mint_to(&minter, &token_account, 2_000)
+        .expect("minting must still succeed");
+    env.burn(&owner, &token_account, 1_000)
+        .expect("program burning must still succeed");
+    let instruction = Instruction::new_with_bytes(
+        stablecoin::id(),
+        &stablecoin::instruction::UpdateConfig {
+            supply_cap: Some(SUPPLY_CAP / 2),
+            compliance_authority: None,
+            pending_admin: None,
+        }
+        .data(),
+        stablecoin::accounts::UpdateConfig {
+            admin: env.admin.pubkey(),
+            mint: env.mint,
+            config: env.config,
+        }
+        .to_account_metas(None),
+    );
+    env.send(&[instruction], &[])
+        .expect("supply cap updates must still succeed");
+
+    let final_config = env.config_state();
+    let supply = env.supply();
+    assert_eq!(supply, 7_000);
+    assert!(supply <= final_config.supply_cap);
+    let outstanding = final_config
+        .total_minted
+        .checked_sub(final_config.total_burned)
+        .expect("tracked outstanding supply must not underflow");
+    assert!(outstanding >= u128::from(supply));
+    assert_eq!(final_config.total_minted, before.total_minted + 2_000);
+    assert_eq!(final_config.total_burned, before.total_burned + 1_000);
 }

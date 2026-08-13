@@ -93,7 +93,11 @@ Callers protect themselves with explicit minimums (`amount_a_min`, `min_lp_out`,
 
 Enforced on-chain, and re-asserted after every operation by the deterministic sequence test:
 
-- `total_minted − total_burned == mint.supply`, and `mint.supply ≤ supply_cap ≤ MAX_SUPPLY_CAP`.
+- The live Token-2022 mint supply is authoritative, and `mint.supply ≤ supply_cap ≤
+  MAX_SUPPLY_CAP` is enforced against it. `total_minted` covers all issuance, because only the
+  config PDA holds mint authority, while `total_burned` only tracks burns routed through this
+  program. An owner may burn a thawed balance through Token-2022 directly, so tracked
+  outstanding supply is an upper bound: `total_minted − total_burned ≥ mint.supply`.
 - Stored pause state always equals the live `PausableConfig`; drift is rejected rather than
   silently corrected.
 - Each wallet policy agrees with the token account's actual frozen state.

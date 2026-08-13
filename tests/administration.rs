@@ -715,8 +715,19 @@ fn invalid_supply_caps_are_rejected() {
 fn broken_counter_invariant_blocks_supply_cap_changes() {
     let mut env = Env::new();
     let (_owner, _token_account) = env.funded_account(10_000);
-    env.patch_config(|config| config.total_minted += 1);
 
+    // Burning more than was ever issued underflows the tracked outstanding supply.
+    env.patch_config(|config| config.total_burned = config.total_minted + 1);
+    expect_error(
+        env.update(Some(50_000), None, None),
+        StablecoinError::CounterInvariantViolation,
+    );
+
+    // Tracked outstanding supply below the live supply is equally inconsistent.
+    env.patch_config(|config| {
+        config.total_minted = 9_999;
+        config.total_burned = 0;
+    });
     expect_error(
         env.update(Some(50_000), None, None),
         StablecoinError::CounterInvariantViolation,

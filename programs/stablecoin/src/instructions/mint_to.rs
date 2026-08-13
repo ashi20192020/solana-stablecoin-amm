@@ -8,6 +8,7 @@ use crate::{
     constants::{CONFIG_SEED, MINTER_SEED, POLICY_SEED},
     errors::StablecoinError,
     events::TokensMinted,
+    instructions::ensure_supply_tracked,
     state::{MintConfig, MinterRole, PolicyStatus, WalletPolicy},
 };
 
@@ -62,10 +63,7 @@ pub(crate) fn handler(ctx: Context<MintTo>, amount: u64) -> Result<()> {
 
     let config = &ctx.accounts.config;
     let supply = ctx.accounts.mint.supply;
-    require!(
-        config.total_minted.checked_sub(config.total_burned) == Some(u128::from(supply)),
-        StablecoinError::CounterInvariantViolation
-    );
+    ensure_supply_tracked(config, supply)?;
 
     let minted = ctx
         .accounts
@@ -114,6 +112,7 @@ pub(crate) fn handler(ctx: Context<MintTo>, amount: u64) -> Result<()> {
 
     ctx.accounts.minter_role.minted = minted;
     ctx.accounts.config.total_minted = total_minted;
+    ensure_supply_tracked(&ctx.accounts.config, new_supply)?;
 
     emit!(TokensMinted {
         mint: ctx.accounts.mint.key(),
