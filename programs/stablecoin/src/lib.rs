@@ -49,6 +49,23 @@ pub mod stablecoin {
     pub fn burn(ctx: Context<Burn>, amount: u64) -> Result<()> {
         instructions::burn::handler(ctx, amount)
     }
+
+    pub fn set_pause(ctx: Context<SetPause>, paused: bool) -> Result<()> {
+        instructions::set_pause::handler(ctx, paused)
+    }
+
+    pub fn update_config(
+        ctx: Context<UpdateConfig>,
+        supply_cap: Option<u64>,
+        compliance_authority: Option<Pubkey>,
+        pending_admin: Option<Pubkey>,
+    ) -> Result<()> {
+        instructions::update_config::handler(ctx, supply_cap, compliance_authority, pending_admin)
+    }
+
+    pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
+        instructions::accept_admin::handler(ctx)
+    }
 }
 
 // Anchor 1.x requires every Accounts struct to bind 'info, so a signer stands in

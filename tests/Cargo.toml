@@ -6,6 +6,10 @@ rust-version.workspace = true
 publish = false
 
 [[test]]
+name = "administration"
+path = "administration.rs"
+
+[[test]]
 name = "health_check"
 path = "health_check.rs"
 

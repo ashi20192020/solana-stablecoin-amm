@@ -40,4 +40,16 @@ pub enum StablecoinError {
     TokenAccountMintMismatch,
     #[msg("token account frozen state does not match the stored wallet policy")]
     PolicyStateMismatch,
+    #[msg("mint pause extension does not match the mirrored config pause flag")]
+    PauseStateDrift,
+    #[msg("mint is already in the requested pause state")]
+    PauseStateUnchanged,
+    #[msg("supply cap must be at least the current mint supply")]
+    SupplyCapBelowSupply,
+    #[msg("no configuration change was requested")]
+    NoConfigChange,
+    #[msg("pending admin must not be the default pubkey or the current admin")]
+    InvalidPendingAdmin,
+    #[msg("signer is not the pending admin")]
+    NoPendingAdmin,
 }
