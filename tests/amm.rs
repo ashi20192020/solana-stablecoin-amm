@@ -14,7 +14,7 @@ use anchor_spl::token_2022::{
             transfer_fee::instruction::initialize_transfer_fee_config, BaseStateWithExtensions,
             ExtensionType, StateWithExtensions,
         },
-        instruction::{initialize_account3, initialize_mint2, transfer_checked},
+        instruction::{burn_checked, initialize_account3, initialize_mint2, transfer_checked},
         state::{Account as TokenAccountState, AccountState, Mint as MintState},
     },
     ID as TOKEN_2022_ID,
@@ -574,6 +574,22 @@ impl Env {
             .expect("donation failed");
     }
 
+    fn burn_lp(&mut self, user: &User, amount: u64) {
+        let instruction = burn_checked(
+            &TOKEN_2022_ID,
+            &user.lp,
+            &self.lp_mint,
+            &user.keypair.pubkey(),
+            &[],
+            amount,
+            DECIMALS,
+        )
+        .expect("burn_checked build failed");
+        let signer = user.keypair.insecure_clone();
+        self.send(&[instruction], &[&signer])
+            .expect("direct lp burn failed");
+    }
+
     fn pool_state(&self) -> Pool {
         let account = self.svm.get_account(&self.pool).expect("pool missing");
         Pool::try_deserialize(&mut account.data.as_slice()).expect("pool deserialize failed")
@@ -610,6 +626,10 @@ impl Env {
 
     fn balance(&self, token_account: &Pubkey) -> u64 {
         self.token_state(token_account).amount
+    }
+
+    fn lp_supply(&self) -> u64 {
+        self.mint_state(&self.lp_mint).supply
     }
 
     fn mint_state(&self, mint: &Pubkey) -> MintState {
@@ -745,7 +765,7 @@ fn pool_initialization_stores_canonical_state() {
     assert_eq!(pool.locked_lp, env.locked_lp);
     assert_eq!(pool.reserve_a, 0);
     assert_eq!(pool.reserve_b, 0);
-    assert_eq!(pool.lp_supply, 0);
+    assert_eq!(env.lp_supply(), 0);
     assert_eq!(pool.fee_bps, FEE_BPS);
     assert_eq!(pool.decimals, DECIMALS);
 
@@ -951,12 +971,11 @@ fn first_deposit_mints_expected_lp_and_locks_the_minimum() {
     let pool = env.pool_state();
     assert_eq!(pool.reserve_a, DEPOSIT_A);
     assert_eq!(pool.reserve_b, DEPOSIT_B);
-    assert_eq!(pool.lp_supply, expected_total);
+    assert_eq!(env.lp_supply(), expected_total);
     assert_eq!(env.balance(&user.lp), expected_user);
     assert_eq!(env.balance(&env.locked_lp), MINIMUM_LIQUIDITY);
     assert_eq!(env.balance(&env.vault_a), DEPOSIT_A);
     assert_eq!(env.balance(&env.vault_b), DEPOSIT_B);
-    assert_eq!(env.mint_state(&env.lp_mint).supply, expected_total);
 }
 
 #[test]
@@ -964,17 +983,18 @@ fn balanced_subsequent_deposit_mints_proportional_lp() {
     let (mut env, first) = Env::seeded(FEE_BPS);
     let second = env.create_user(100_000_000, 100_000_000);
     let before = env.pool_state();
+    let before_supply = env.lp_supply();
 
     env.add_liquidity(&second, DEPOSIT_A / 2, DEPOSIT_B / 2, 0, 0, 0)
         .expect("balanced deposit failed");
 
-    let expected_lp = DEPOSIT_A / 2 * before.lp_supply / before.reserve_a;
+    let expected_lp = DEPOSIT_A / 2 * before_supply / before.reserve_a;
     let pool = env.pool_state();
     assert_eq!(env.balance(&second.lp), expected_lp);
     assert_eq!(pool.reserve_a, before.reserve_a + DEPOSIT_A / 2);
     assert_eq!(pool.reserve_b, before.reserve_b + DEPOSIT_B / 2);
-    assert_eq!(pool.lp_supply, before.lp_supply + expected_lp);
-    assert_eq!(env.balance(&first.lp), before.lp_supply - MINIMUM_LIQUIDITY);
+    assert_eq!(env.lp_supply(), before_supply + expected_lp);
+    assert_eq!(env.balance(&first.lp), before_supply - MINIMUM_LIQUIDITY);
 }
 
 #[test]
@@ -1033,7 +1053,7 @@ fn first_deposit_below_the_locked_minimum_is_rejected() {
         env.add_liquidity(&user, MINIMUM_LIQUIDITY, MINIMUM_LIQUIDITY, 0, 0, 0),
         AmmError::InsufficientInitialLiquidity,
     );
-    assert_eq!(env.pool_state().lp_supply, 0);
+    assert_eq!(env.lp_supply(), 0);
 }
 
 #[test]
@@ -1120,9 +1140,10 @@ fn paused_stablecoin_blocks_deposits_and_removals() {
 fn proportional_removal_returns_expected_amounts() {
     let (mut env, user) = Env::seeded(FEE_BPS);
     let before = env.pool_state();
+    let before_supply = env.lp_supply();
     let lp_amount = 1_000_000;
-    let expected_a = lp_amount * before.reserve_a / before.lp_supply;
-    let expected_b = lp_amount * before.reserve_b / before.lp_supply;
+    let expected_a = lp_amount * before.reserve_a / before_supply;
+    let expected_b = lp_amount * before.reserve_b / before_supply;
     let (had_a, had_b) = (env.balance(&user.token_a), env.balance(&user.token_b));
 
     env.remove_liquidity(&user, lp_amount, expected_a, expected_b)
@@ -1133,8 +1154,7 @@ fn proportional_removal_returns_expected_amounts() {
     assert_eq!(env.balance(&user.token_b) - had_b, expected_b);
     assert_eq!(pool.reserve_a, before.reserve_a - expected_a);
     assert_eq!(pool.reserve_b, before.reserve_b - expected_b);
-    assert_eq!(pool.lp_supply, before.lp_supply - lp_amount);
-    assert_eq!(env.mint_state(&env.lp_mint).supply, pool.lp_supply);
+    assert_eq!(env.lp_supply(), before_supply - lp_amount);
     assert!(env.balance(&env.vault_a) >= pool.reserve_a);
     assert!(env.balance(&env.vault_b) >= pool.reserve_b);
     assert_eq!(env.balance(&env.locked_lp), MINIMUM_LIQUIDITY);
@@ -1143,37 +1163,37 @@ fn proportional_removal_returns_expected_amounts() {
 #[test]
 fn full_removable_withdrawal_leaves_exactly_the_locked_minimum() {
     let (mut env, user) = Env::seeded(FEE_BPS);
-    let removable = env.pool_state().lp_supply - MINIMUM_LIQUIDITY;
+    let removable = env.lp_supply() - MINIMUM_LIQUIDITY;
 
     env.remove_liquidity(&user, removable, 0, 0)
         .expect("full removal failed");
 
     let pool = env.pool_state();
-    assert_eq!(pool.lp_supply, MINIMUM_LIQUIDITY);
+    assert_eq!(env.lp_supply(), MINIMUM_LIQUIDITY);
     assert_eq!(env.balance(&env.locked_lp), MINIMUM_LIQUIDITY);
     assert_eq!(env.balance(&user.lp), 0);
     assert!(pool.reserve_a > 0 && pool.reserve_b > 0);
-    assert_eq!(env.mint_state(&env.lp_mint).supply, MINIMUM_LIQUIDITY);
 }
 
 #[test]
 fn withdrawal_slippage_is_enforced() {
     let (mut env, user) = Env::seeded(FEE_BPS);
     let before = env.pool_state();
+    let before_supply = env.lp_supply();
     let lp_amount = 1_000_000;
-    let expected_a = lp_amount * before.reserve_a / before.lp_supply;
+    let expected_a = lp_amount * before.reserve_a / before_supply;
 
     expect_error(
         env.remove_liquidity(&user, lp_amount, expected_a + 1, 0),
         AmmError::SlippageExceeded,
     );
-    assert_eq!(env.pool_state().lp_supply, before.lp_supply);
+    assert_eq!(env.lp_supply(), before_supply);
 }
 
 #[test]
 fn invalid_removal_amounts_are_rejected() {
     let (mut env, user) = Env::seeded(FEE_BPS);
-    let lp_supply = env.pool_state().lp_supply;
+    let lp_supply = env.lp_supply();
 
     expect_error(env.remove_liquidity(&user, 0, 0, 0), AmmError::ZeroAmount);
     expect_error(
@@ -1184,7 +1204,7 @@ fn invalid_removal_amounts_are_rejected() {
         env.remove_liquidity(&user, lp_supply - MINIMUM_LIQUIDITY + 1, 0, 0),
         AmmError::InsufficientLiquidity,
     );
-    assert_eq!(env.pool_state().lp_supply, lp_supply);
+    assert_eq!(env.lp_supply(), lp_supply);
 }
 
 #[test]
@@ -1574,4 +1594,160 @@ fn stablecoin_pause_state_is_visible_to_the_amm() {
     env.set_pause(mint_a, false).expect("resume failed");
     env.add_liquidity(&user, DEPOSIT_A / 2, DEPOSIT_B / 2, 0, 0, 0)
         .expect("deposit must work once resumed");
+}
+
+#[test]
+fn external_lp_burn_reduces_supply_without_blocking_the_pool() {
+    let (mut env, user) = Env::seeded(FEE_BPS);
+    let supply_before = env.lp_supply();
+    let burned = env.balance(&user.lp) / 2;
+
+    env.burn_lp(&user, burned);
+    assert_eq!(env.lp_supply(), supply_before - burned);
+
+    let trader = env.create_user(1_000_000, 0);
+    let reserves = env.pool_state();
+    let amount_in = 100_000;
+    let expected_out = expected_swap_out(
+        amount_in,
+        reserves.reserve_a,
+        reserves.reserve_b,
+        reserves.fee_bps,
+    );
+    env.swap(&trader, SwapDirection::AtoB, amount_in, expected_out)
+        .expect("swap must survive an external lp burn");
+
+    let depositor = env.create_user(100_000_000, 100_000_000);
+    let pool = env.pool_state();
+    let supply = env.lp_supply();
+    let amount_a = DEPOSIT_A / 2;
+    let amount_b =
+        (u128::from(amount_a) * u128::from(pool.reserve_b)).div_ceil(u128::from(pool.reserve_a));
+    let lp_from_a = u128::from(amount_a) * u128::from(supply) / u128::from(pool.reserve_a);
+    let lp_from_b = amount_b * u128::from(supply) / u128::from(pool.reserve_b);
+    let expected_lp = u64::try_from(lp_from_a.min(lp_from_b)).expect("lp fits in u64");
+
+    env.add_liquidity(&depositor, amount_a, 100_000_000, 0, 0, 0)
+        .expect("deposit after an external burn failed");
+    assert_eq!(env.balance(&depositor.lp), expected_lp);
+    assert_eq!(env.lp_supply(), supply + expected_lp);
+
+    let remaining = env.balance(&user.lp);
+    env.remove_liquidity(&user, remaining, 0, 0)
+        .expect("withdrawal after an external burn failed");
+    assert_eq!(env.balance(&user.lp), 0);
+
+    let pool = env.pool_state();
+    assert!(pool.reserve_a > 0 && pool.reserve_b > 0);
+    assert!(env.balance(&env.vault_a) >= pool.reserve_a);
+    assert!(env.balance(&env.vault_b) >= pool.reserve_b);
+    assert!(env.lp_supply() >= env.balance(&env.locked_lp));
+}
+
+#[test]
+fn donated_locked_lp_does_not_block_the_pool() {
+    let (mut env, user) = Env::seeded(FEE_BPS);
+    let (lp_mint, locked_lp) = (env.lp_mint, env.locked_lp);
+    let donation = 1_000;
+    env.donate(&user, lp_mint, user.lp, locked_lp, donation);
+
+    let locked = env.balance(&env.locked_lp);
+    assert_eq!(locked, MINIMUM_LIQUIDITY + donation);
+    assert!(locked > MINIMUM_LIQUIDITY);
+
+    let trader = env.create_user(1_000_000, 0);
+    let reserves = env.pool_state();
+    let amount_in = 100_000;
+    let expected_out = expected_swap_out(
+        amount_in,
+        reserves.reserve_a,
+        reserves.reserve_b,
+        reserves.fee_bps,
+    );
+    env.swap(&trader, SwapDirection::AtoB, amount_in, expected_out)
+        .expect("swap must survive a locked-lp donation");
+
+    let depositor = env.create_user(100_000_000, 100_000_000);
+    env.add_liquidity(&depositor, DEPOSIT_A / 2, 100_000_000, 0, 0, 0)
+        .expect("deposit must survive a locked-lp donation");
+    env.remove_liquidity(&user, 1_000_000, 0, 0)
+        .expect("removal must survive a locked-lp donation");
+
+    let supply = env.lp_supply();
+    let locked = env.balance(&env.locked_lp);
+    expect_error(
+        env.remove_liquidity(&user, supply - locked + 1, 0, 0),
+        AmmError::LockedLiquidityInvariant,
+    );
+    assert_eq!(env.lp_supply(), supply);
+    assert_eq!(env.balance(&env.locked_lp), locked);
+}
+
+#[test]
+fn pre_funded_pool_hierarchy_cannot_be_squatted() {
+    let mut env = Env::new();
+    let payer = env.admin.pubkey();
+    let children = [env.vault_a, env.vault_b, env.lp_mint, env.locked_lp];
+    // The runtime refuses to leave a modified account below rent exemption, so the
+    // smallest possible squat is the zero-data minimum; lp_mint is overfunded instead.
+    let dust = env.svm.minimum_balance_for_rent_exemption(0);
+    let excess = 10_000_000_000;
+    let squats: Vec<Instruction> = std::iter::once(env.pool)
+        .chain(children)
+        .map(|target| {
+            let lamports = if target == env.lp_mint { excess } else { dust };
+            system_instruction::transfer(&payer, &target, lamports)
+        })
+        .collect();
+    env.send(&squats, &[]).expect("pre-funding failed");
+
+    env.init_pool(FEE_BPS)
+        .expect("initialization must tolerate pre-funded pdas");
+    env.allow_vaults();
+
+    let pool_account = env.svm.get_account(&env.pool).expect("pool missing");
+    assert_eq!(pool_account.owner, amm::id());
+    assert_eq!(pool_account.data.len(), 8 + Pool::INIT_SPACE);
+    assert!(
+        pool_account.lamports
+            >= env
+                .svm
+                .minimum_balance_for_rent_exemption(pool_account.data.len())
+    );
+
+    for child in children {
+        let account = env.svm.get_account(&child).expect("child pda missing");
+        assert_eq!(account.owner, TOKEN_2022_ID);
+        assert!(
+            account.lamports
+                >= env
+                    .svm
+                    .minimum_balance_for_rent_exemption(account.data.len())
+        );
+    }
+    let lp_mint_account = env.svm.get_account(&env.lp_mint).expect("lp mint missing");
+    assert_eq!(lp_mint_account.lamports, excess);
+    assert_eq!(env.mint_state(&env.lp_mint).decimals, DECIMALS);
+    assert_eq!(env.token_state(&env.locked_lp).mint, env.lp_mint);
+    assert_eq!(env.token_state(&env.vault_a).mint, env.mint_a);
+    assert_eq!(env.token_state(&env.vault_b).mint, env.mint_b);
+
+    let user = env.create_user(100_000_000, 100_000_000);
+    env.add_liquidity(&user, DEPOSIT_A, DEPOSIT_B, 0, 0, 0)
+        .expect("pre-funded pool must remain usable");
+    assert_eq!(env.balance(&env.locked_lp), MINIMUM_LIQUIDITY);
+}
+
+#[test]
+fn an_occupied_child_pda_is_rejected() {
+    let mut env = Env::new();
+    let mut squatter = env.svm.get_account(&env.mint_a).expect("mint_a missing");
+    squatter.lamports = env
+        .svm
+        .minimum_balance_for_rent_exemption(squatter.data.len());
+    env.svm
+        .set_account(env.vault_a, squatter)
+        .expect("set_account failed");
+
+    expect_error(env.init_pool(FEE_BPS), AmmError::ChildAccountInUse);
 }

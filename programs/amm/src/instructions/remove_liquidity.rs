@@ -128,12 +128,18 @@ pub(crate) fn handler(
         pool,
         ctx.accounts.vault_a.amount,
         ctx.accounts.vault_b.amount,
-        ctx.accounts.lp_mint.supply,
     )?;
-    ensure_seeded(pool, ctx.accounts.locked_lp.amount)?;
 
-    let quote = quote_remove_liquidity(lp_amount, pool.reserve_a, pool.reserve_b, pool.lp_supply)
+    let lp_supply = ctx.accounts.lp_mint.supply;
+    let locked_lp = ctx.accounts.locked_lp.amount;
+    ensure_seeded(pool, lp_supply, locked_lp)?;
+
+    let quote = quote_remove_liquidity(lp_amount, pool.reserve_a, pool.reserve_b, lp_supply)
         .map_err(AmmError::from)?;
+    require!(
+        quote.new_lp_supply >= locked_lp,
+        AmmError::LockedLiquidityInvariant
+    );
     require!(
         quote.amount_a >= min_a_out && quote.amount_b >= min_b_out,
         AmmError::SlippageExceeded
@@ -191,21 +197,22 @@ pub(crate) fn handler(
     let pool = &mut ctx.accounts.pool;
     pool.reserve_a = quote.new_reserve_a;
     pool.reserve_b = quote.new_reserve_b;
-    pool.lp_supply = quote.new_lp_supply;
 
     ctx.accounts.vault_a.reload()?;
     ctx.accounts.vault_b.reload()?;
     ctx.accounts.lp_mint.reload()?;
-    ctx.accounts.locked_lp.reload()?;
 
+    require!(
+        ctx.accounts.lp_mint.supply == quote.new_lp_supply,
+        AmmError::LpSupplyInvariant
+    );
     let pool = &ctx.accounts.pool;
     ensure_solvent(
         pool,
         ctx.accounts.vault_a.amount,
         ctx.accounts.vault_b.amount,
-        ctx.accounts.lp_mint.supply,
     )?;
-    ensure_seeded(pool, ctx.accounts.locked_lp.amount)?;
+    ensure_seeded(pool, quote.new_lp_supply, locked_lp)?;
 
     emit!(LiquidityRemoved {
         pool: pool.key(),

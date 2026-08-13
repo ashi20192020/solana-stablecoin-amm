@@ -115,7 +115,6 @@ pub(crate) fn handler(
         pool,
         ctx.accounts.vault_a.amount,
         ctx.accounts.vault_b.amount,
-        ctx.accounts.lp_mint.supply,
     )?;
 
     let (reserve_in, reserve_out) = match direction {
@@ -209,7 +208,6 @@ pub(crate) fn handler(
         pool,
         ctx.accounts.vault_a.amount,
         ctx.accounts.vault_b.amount,
-        ctx.accounts.lp_mint.supply,
     )?;
 
     emit!(SwapExecuted {

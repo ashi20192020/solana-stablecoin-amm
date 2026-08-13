@@ -1,6 +1,8 @@
 use anchor_lang::{
     prelude::*,
-    system_program::{create_account, CreateAccount},
+    system_program::{
+        allocate, assign, create_account, transfer, Allocate, Assign, CreateAccount, Transfer,
+    },
 };
 use anchor_spl::{
     token_2022::{
@@ -187,7 +189,6 @@ pub(crate) fn handler(ctx: Context<InitializePool>, fee_bps: u16) -> Result<()> 
         locked_lp: ctx.accounts.locked_lp.key(),
         reserve_a: 0,
         reserve_b: 0,
-        lp_supply: 0,
         fee_bps,
         decimals,
         bump: bumps.pool,
@@ -256,17 +257,63 @@ fn create_pda_account<'info>(
     space: usize,
     seeds: &[&[u8]],
 ) -> Result<()> {
-    create_account(
+    let rent_exempt = Rent::get()?.minimum_balance(space);
+    let space = u64::try_from(space).map_err(|_| AmmError::MathOverflow)?;
+
+    if target.lamports() == 0 {
+        return create_account(
+            CpiContext::new(
+                system_program,
+                CreateAccount {
+                    from: payer.clone(),
+                    to: target.clone(),
+                },
+            )
+            .with_signer(&[seeds]),
+            rent_exempt,
+            space,
+            owner,
+        );
+    }
+
+    // A pre-funded address cannot be passed to `create_account`, so it is topped up,
+    // allocated, and assigned instead; anything already in use is rejected.
+    require!(
+        target.owner == &system_program && target.data_is_empty(),
+        AmmError::ChildAccountInUse
+    );
+
+    let deficit = rent_exempt.saturating_sub(target.lamports());
+    if deficit > 0 {
+        transfer(
+            CpiContext::new(
+                system_program,
+                Transfer {
+                    from: payer.clone(),
+                    to: target.clone(),
+                },
+            ),
+            deficit,
+        )?;
+    }
+    allocate(
         CpiContext::new(
             system_program,
-            CreateAccount {
-                from: payer.clone(),
-                to: target.clone(),
+            Allocate {
+                account_to_allocate: target.clone(),
             },
         )
         .with_signer(&[seeds]),
-        Rent::get()?.minimum_balance(space),
-        u64::try_from(space).map_err(|_| AmmError::MathOverflow)?,
+        space,
+    )?;
+    assign(
+        CpiContext::new(
+            system_program,
+            Assign {
+                account_to_assign: target.clone(),
+            },
+        )
+        .with_signer(&[seeds]),
         owner,
     )
 }

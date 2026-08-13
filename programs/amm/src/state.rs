@@ -11,7 +11,6 @@ pub struct Pool {
     pub locked_lp: Pubkey,
     pub reserve_a: u64,
     pub reserve_b: u64,
-    pub lp_supply: u64,
     pub fee_bps: u16,
     pub decimals: u8,
     pub bump: u8,

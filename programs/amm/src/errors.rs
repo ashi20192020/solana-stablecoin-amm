@@ -24,10 +24,12 @@ pub enum AmmError {
     SlippageExceeded,
     #[msg("vault balance is below the stored reserve")]
     VaultBalanceInvariant,
-    #[msg("lp mint supply does not match the stored lp supply")]
+    #[msg("lp mint supply does not match the expected result of this operation")]
     LpSupplyInvariant,
-    #[msg("locked liquidity does not match the permanently locked minimum")]
+    #[msg("locked liquidity is outside the permanently locked bounds")]
     LockedLiquidityInvariant,
+    #[msg("canonical child account is already in use")]
+    ChildAccountInUse,
     #[msg("the same token account was supplied twice")]
     DuplicateAccount,
     #[msg("token account does not belong to the expected mint")]

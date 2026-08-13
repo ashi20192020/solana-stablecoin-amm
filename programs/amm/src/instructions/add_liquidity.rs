@@ -133,13 +133,13 @@ pub(crate) fn handler(
         pool,
         ctx.accounts.vault_a.amount,
         ctx.accounts.vault_b.amount,
-        ctx.accounts.lp_mint.supply,
     )?;
 
-    let first_deposit = pool.lp_supply == 0;
-    let (amount_a, amount_b, lp_to_user, lp_to_lock) = if first_deposit {
+    let lp_supply = ctx.accounts.lp_mint.supply;
+    let locked_lp = ctx.accounts.locked_lp.amount;
+    let (amount_a, amount_b, lp_to_user, lp_to_lock) = if lp_supply == 0 {
         require!(
-            pool.reserve_a == 0 && pool.reserve_b == 0 && ctx.accounts.locked_lp.amount == 0,
+            pool.reserve_a == 0 && pool.reserve_b == 0 && locked_lp == 0,
             AmmError::InvalidLiquidityState
         );
         let quote =
@@ -151,12 +151,13 @@ pub(crate) fn handler(
             quote.lp_to_lock,
         )
     } else {
+        ensure_seeded(pool, lp_supply, locked_lp)?;
         let quote = quote_add_liquidity(
             amount_a_desired,
             amount_b_desired,
             pool.reserve_a,
             pool.reserve_b,
-            pool.lp_supply,
+            lp_supply,
         )
         .map_err(AmmError::from)?;
         (quote.amount_a, quote.amount_b, quote.lp_minted, 0)
@@ -175,8 +176,7 @@ pub(crate) fn handler(
         .reserve_b
         .checked_add(amount_b)
         .ok_or(AmmError::MathOverflow)?;
-    let lp_supply = pool
-        .lp_supply
+    let expected_lp_supply = lp_supply
         .checked_add(lp_to_user)
         .and_then(|supply| supply.checked_add(lp_to_lock))
         .ok_or(AmmError::MathOverflow)?;
@@ -248,21 +248,23 @@ pub(crate) fn handler(
     let pool = &mut ctx.accounts.pool;
     pool.reserve_a = reserve_a;
     pool.reserve_b = reserve_b;
-    pool.lp_supply = lp_supply;
 
     ctx.accounts.vault_a.reload()?;
     ctx.accounts.vault_b.reload()?;
     ctx.accounts.lp_mint.reload()?;
     ctx.accounts.locked_lp.reload()?;
 
+    require!(
+        ctx.accounts.lp_mint.supply == expected_lp_supply,
+        AmmError::LpSupplyInvariant
+    );
     let pool = &ctx.accounts.pool;
     ensure_solvent(
         pool,
         ctx.accounts.vault_a.amount,
         ctx.accounts.vault_b.amount,
-        ctx.accounts.lp_mint.supply,
     )?;
-    ensure_seeded(pool, ctx.accounts.locked_lp.amount)?;
+    ensure_seeded(pool, expected_lp_supply, ctx.accounts.locked_lp.amount)?;
 
     emit!(LiquidityAdded {
         pool: pool.key(),
@@ -272,7 +274,7 @@ pub(crate) fn handler(
         lp_minted: lp_to_user,
         reserve_a,
         reserve_b,
-        lp_supply,
+        lp_supply: expected_lp_supply,
     });
 
     Ok(())
