@@ -58,7 +58,7 @@ pub struct InitializeStablecoin<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(
+pub(crate) fn handler(
     ctx: Context<InitializeStablecoin>,
     symbol: [u8; 8],
     name: String,

@@ -13,6 +13,10 @@ path = "health_check.rs"
 name = "initialize_stablecoin"
 path = "initialize_stablecoin.rs"
 
+[[test]]
+name = "issuance"
+path = "issuance.rs"
+
 [dev-dependencies]
 amm = { path = "../programs/amm", features = ["no-entrypoint"] }
 anchor-lang.workspace = true
