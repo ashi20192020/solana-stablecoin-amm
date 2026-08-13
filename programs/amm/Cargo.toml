@@ -22,5 +22,8 @@ custom-panic = []
 anchor-lang.workspace = true
 stablecoin = { path = "../stablecoin", features = ["cpi"] }
 
+[dev-dependencies]
+proptest = "=1.11.0"
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
