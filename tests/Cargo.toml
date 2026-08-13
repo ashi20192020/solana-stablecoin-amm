@@ -10,6 +10,10 @@ name = "administration"
 path = "administration.rs"
 
 [[test]]
+name = "amm"
+path = "amm.rs"
+
+[[test]]
 name = "health_check"
 path = "health_check.rs"
 
