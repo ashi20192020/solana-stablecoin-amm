@@ -1,0 +1,21 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[test]]
+name = "health_check"
+path = "health_check.rs"
+
+[dev-dependencies]
+amm = { path = "../programs/amm", features = ["no-entrypoint"] }
+anchor-lang.workspace = true
+litesvm.workspace = true
+solana-instruction.workspace = true
+solana-keypair.workspace = true
+solana-message.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+stablecoin = { path = "../programs/stablecoin", features = ["no-entrypoint"] }

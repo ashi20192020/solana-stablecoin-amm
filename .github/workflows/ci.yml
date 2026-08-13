@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  ANCHOR_VERSION: 1.1.2
+  SOLANA_VERSION: 3.1.10
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/solana
+            target
+          key: ${{ runner.os }}-anchor${{ env.ANCHOR_VERSION }}-solana${{ env.SOLANA_VERSION }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-anchor${{ env.ANCHOR_VERSION }}-solana${{ env.SOLANA_VERSION }}-
+
+      - name: Install Solana
+        run: |
+          sh -c "$(curl -sSfL "https://release.anza.xyz/v${SOLANA_VERSION}/install")"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor
+        # Built outside the checkout so rust-toolchain.toml does not pin the CLI build.
+        run: |
+          if [ "$(anchor --version 2>/dev/null)" != "anchor-cli ${ANCHOR_VERSION}" ]; then
+            cd "$HOME" && cargo install anchor-cli --version "${ANCHOR_VERSION}" --locked --force
+          fi
+
+      - name: Report tool versions
+        run: |
+          rustc --version
+          cargo --version
+          solana --version
+          anchor --version
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy (programs)
+        run: cargo clippy --workspace --exclude integration-tests --all-targets --all-features -- -D warnings
+
+      # Must precede the integration-test steps: they include_bytes! the compiled programs.
+      - name: Anchor build
+        run: anchor build
+
+      - name: Clippy (integration tests)
+        run: cargo clippy -p integration-tests --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-features
