@@ -28,8 +28,6 @@ pub enum AmmError {
     LpSupplyInvariant,
     #[msg("locked liquidity is outside the permanently locked bounds")]
     LockedLiquidityInvariant,
-    #[msg("canonical child account is already in use")]
-    ChildAccountInUse,
     #[msg("the same token account was supplied twice")]
     DuplicateAccount,
     #[msg("token account does not belong to the expected mint")]
@@ -54,6 +52,10 @@ pub enum AmmError {
     ValueOutOfRange,
     #[msg("arithmetic overflow")]
     MathOverflow,
+    #[msg("canonical child account is already in use")]
+    ChildAccountInUse,
+    #[msg("lp mint authority is not the pool pda or a freeze authority is set")]
+    InvalidMintAuthority,
 }
 
 impl From<MathError> for AmmError {

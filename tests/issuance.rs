@@ -1,3 +1,5 @@
+mod support;
+
 use anchor_lang::{
     error::ErrorCode as AnchorError,
     prelude::{Clock, Pubkey},
@@ -24,6 +26,7 @@ use solana_transaction_error::TransactionError;
 use stablecoin::{
     constants::{CONFIG_SEED, MINTER_SEED, MINT_SEED, POLICY_SEED},
     errors::StablecoinError,
+    events::{MinterGranted, MinterRevoked, TokensBurned, TokensMinted, WalletPolicyChanged},
     state::{MintConfig, MinterRole, PolicyStatus, WalletPolicy},
 };
 
@@ -205,6 +208,7 @@ struct Env {
     admin: Keypair,
     mint: Pubkey,
     config: Pubkey,
+    logs: Vec<String>,
 }
 
 impl Env {
@@ -227,6 +231,7 @@ impl Env {
             admin,
             mint,
             config: config_pda(&mint),
+            logs: Vec::new(),
         };
         let instruction = initialize_ix(&env.admin.pubkey(), SYMBOL, supply_cap);
         env.send(&[instruction], &[])
@@ -247,10 +252,21 @@ impl Env {
             VersionedTransaction::try_new(VersionedMessage::Legacy(message), &signers)
                 .expect("failed to sign transaction");
 
-        self.svm
-            .send_transaction(transaction)
-            .map(|_| ())
-            .map_err(Box::new)
+        self.logs.clear();
+        match self.svm.send_transaction(transaction) {
+            Ok(meta) => {
+                self.logs = meta.logs;
+                Ok(())
+            }
+            Err(failure) => {
+                self.logs = failure.meta.logs.clone();
+                Err(Box::new(failure))
+            }
+        }
+    }
+
+    fn events<E: anchor_lang::Discriminator + anchor_lang::AnchorDeserialize>(&self) -> Vec<E> {
+        support::decode_events(&self.logs)
     }
 
     fn funded_keypair(&mut self) -> Keypair {
@@ -1140,4 +1156,78 @@ fn substituted_role_and_policy_accounts_are_rejected() {
         env.send(&[foreign_policy], &[&minter]),
         AnchorError::ConstraintSeeds,
     );
+}
+
+#[test]
+fn minter_lifecycle_emits_typed_events() {
+    let mut env = Env::new();
+    let minter = env.funded_keypair();
+
+    env.grant(&minter.pubkey(), ALLOWANCE)
+        .expect("grant failed");
+    let granted: Vec<MinterGranted> = env.events();
+    assert_eq!(granted.len(), 1);
+    assert_eq!(granted[0].config, env.config);
+    assert_eq!(granted[0].authority, minter.pubkey());
+    assert_eq!(granted[0].allowance, ALLOWANCE);
+
+    let destination = env.create_token_account(&minter.pubkey());
+    env.set_policy(&destination, PolicyStatus::Allowed)
+        .expect("policy failed");
+    let policies: Vec<WalletPolicyChanged> = env.events();
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].mint, env.mint);
+    assert_eq!(policies[0].token_account, destination);
+    assert_eq!(policies[0].owner, minter.pubkey());
+    assert_eq!(policies[0].status, PolicyStatus::Allowed);
+    assert_eq!(policies[0].updated_by, env.admin.pubkey());
+
+    env.mint_to(&minter, &destination, 5_000)
+        .expect("mint failed");
+    let minted: Vec<TokensMinted> = env.events();
+    assert_eq!(minted.len(), 1);
+    assert_eq!(minted[0].mint, env.mint);
+    assert_eq!(minted[0].minter, minter.pubkey());
+    assert_eq!(minted[0].destination, destination);
+    assert_eq!(minted[0].amount, 5_000);
+    assert_eq!(minted[0].minter_minted, 5_000);
+    assert_eq!(minted[0].supply, 5_000);
+
+    env.burn(&minter, &destination, 2_000).expect("burn failed");
+    let burned: Vec<TokensBurned> = env.events();
+    assert_eq!(burned.len(), 1);
+    assert_eq!(burned[0].owner, minter.pubkey());
+    assert_eq!(burned[0].source, destination);
+    assert_eq!(burned[0].amount, 2_000);
+    assert_eq!(burned[0].supply, 3_000);
+
+    env.revoke(&minter.pubkey()).expect("revoke failed");
+    let revoked: Vec<MinterRevoked> = env.events();
+    assert_eq!(revoked.len(), 1);
+    assert_eq!(revoked[0].authority, minter.pubkey());
+    assert_eq!(revoked[0].minted, 5_000);
+}
+
+#[test]
+fn a_rejected_mint_emits_no_event_and_changes_nothing() {
+    let mut env = Env::new();
+    let minter = env.funded_keypair();
+    env.grant(&minter.pubkey(), ALLOWANCE)
+        .expect("grant failed");
+    let destination = env.create_token_account(&minter.pubkey());
+    env.set_policy(&destination, PolicyStatus::Allowed)
+        .expect("policy failed");
+
+    let before = env.config_state();
+    expect_error(
+        env.mint_to(&minter, &destination, ALLOWANCE + 1),
+        StablecoinError::AllowanceExceeded,
+    );
+
+    let minted: Vec<TokensMinted> = env.events();
+    assert!(minted.is_empty());
+    let after = env.config_state();
+    assert_eq!(after.total_minted, before.total_minted);
+    assert_eq!(env.supply(), 0);
+    assert_eq!(env.balance(&destination), 0);
 }

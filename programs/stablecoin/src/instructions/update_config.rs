@@ -4,6 +4,7 @@ use anchor_spl::token_interface::Mint;
 use crate::{
     constants::{CONFIG_SEED, MAX_SUPPLY_CAP},
     errors::StablecoinError,
+    events::ConfigUpdated,
     state::MintConfig,
 };
 
@@ -72,6 +73,15 @@ pub(crate) fn handler(
         );
         ctx.accounts.config.pending_admin = Some(authority);
     }
+
+    let config = &ctx.accounts.config;
+    emit!(ConfigUpdated {
+        mint: config.mint,
+        admin: config.admin,
+        supply_cap: config.supply_cap,
+        compliance_authority: config.compliance_authority,
+        pending_admin: config.pending_admin,
+    });
 
     Ok(())
 }

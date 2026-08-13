@@ -3,6 +3,7 @@ use anchor_lang::prelude::*;
 use crate::{
     constants::{CONFIG_SEED, MINTER_SEED},
     errors::StablecoinError,
+    events::MinterRevoked,
     state::{MintConfig, MinterRole},
 };
 
@@ -33,6 +34,12 @@ pub struct RevokeMinter<'info> {
     pub minter_role: Account<'info, MinterRole>,
 }
 
-pub(crate) fn handler(_ctx: Context<RevokeMinter>) -> Result<()> {
+pub(crate) fn handler(ctx: Context<RevokeMinter>) -> Result<()> {
+    emit!(MinterRevoked {
+        config: ctx.accounts.config.key(),
+        authority: ctx.accounts.authority.key(),
+        minted: ctx.accounts.minter_role.minted,
+    });
+
     Ok(())
 }

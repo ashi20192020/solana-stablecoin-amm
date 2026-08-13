@@ -1,6 +1,8 @@
 use anchor_lang::{
     prelude::*,
-    system_program::{create_account, CreateAccount},
+    system_program::{
+        allocate, assign, create_account, transfer, Allocate, Assign, CreateAccount, Transfer,
+    },
 };
 use anchor_spl::{
     token_2022::{
@@ -24,6 +26,7 @@ use crate::{
         CONFIG_SEED, MAX_NAME_LEN, MAX_SUPPLY_CAP, MAX_URI_LEN, MINT_SEED, STABLECOIN_DECIMALS,
     },
     errors::StablecoinError,
+    events::StablecoinInitialized,
     state::MintConfig,
     token2022::pausable_initialize,
 };
@@ -107,18 +110,14 @@ pub(crate) fn handler(
 
     let mint_bump = ctx.bumps.mint;
     let mint_seeds: &[&[u8]] = &[MINT_SEED, symbol.as_ref(), &[mint_bump]];
-    create_account(
-        CpiContext::new(
-            ctx.accounts.system_program.key(),
-            CreateAccount {
-                from: ctx.accounts.payer.to_account_info(),
-                to: ctx.accounts.mint.to_account_info(),
-            },
-        )
-        .with_signer(&[mint_seeds]),
-        rent.minimum_balance(final_len),
-        u64::try_from(base_len).map_err(|_| StablecoinError::MathOverflow)?,
+    create_mint_account(
+        &ctx.accounts.payer.to_account_info(),
+        &ctx.accounts.mint.to_account_info(),
+        ctx.accounts.system_program.key(),
         &token_program_id,
+        rent.minimum_balance(final_len),
+        base_len,
+        mint_seeds,
     )?;
 
     default_account_state_initialize(
@@ -202,7 +201,87 @@ pub(crate) fn handler(
         _reserved: [0; 64],
     });
 
+    emit!(StablecoinInitialized {
+        mint: mint_key,
+        config: config_key,
+        admin: payer_key,
+        symbol,
+        decimals,
+        supply_cap,
+    });
+
     Ok(())
+}
+
+/// The mint PDA address is public, so anyone can fund it before initialization.
+/// A pre-funded system-owned address is topped up, allocated, and assigned instead
+/// of being passed to `create_account`, which rejects any non-zero balance.
+#[allow(clippy::too_many_arguments)]
+fn create_mint_account<'info>(
+    payer: &AccountInfo<'info>,
+    mint: &AccountInfo<'info>,
+    system_program: Pubkey,
+    token_program: &Pubkey,
+    rent_exempt: u64,
+    space: usize,
+    seeds: &[&[u8]],
+) -> Result<()> {
+    let space = u64::try_from(space).map_err(|_| StablecoinError::MathOverflow)?;
+
+    if mint.lamports() == 0 {
+        return create_account(
+            CpiContext::new(
+                system_program,
+                CreateAccount {
+                    from: payer.clone(),
+                    to: mint.clone(),
+                },
+            )
+            .with_signer(&[seeds]),
+            rent_exempt,
+            space,
+            token_program,
+        );
+    }
+
+    require!(
+        mint.owner == &system_program && mint.data_is_empty(),
+        StablecoinError::MintAccountInUse
+    );
+
+    let deficit = rent_exempt.saturating_sub(mint.lamports());
+    if deficit > 0 {
+        transfer(
+            CpiContext::new(
+                system_program,
+                Transfer {
+                    from: payer.clone(),
+                    to: mint.clone(),
+                },
+            ),
+            deficit,
+        )?;
+    }
+    allocate(
+        CpiContext::new(
+            system_program,
+            Allocate {
+                account_to_allocate: mint.clone(),
+            },
+        )
+        .with_signer(&[seeds]),
+        space,
+    )?;
+    assign(
+        CpiContext::new(
+            system_program,
+            Assign {
+                account_to_assign: mint.clone(),
+            },
+        )
+        .with_signer(&[seeds]),
+        token_program,
+    )
 }
 
 fn normalize_symbol(symbol: &[u8; 8]) -> Result<String> {

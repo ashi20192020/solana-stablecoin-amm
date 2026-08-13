@@ -7,6 +7,7 @@ use anchor_spl::{
 use crate::{
     constants::{CONFIG_SEED, MINTER_SEED, POLICY_SEED},
     errors::StablecoinError,
+    events::TokensMinted,
     state::{MintConfig, MinterRole, PolicyStatus, WalletPolicy},
 };
 
@@ -105,8 +106,23 @@ pub(crate) fn handler(ctx: Context<MintTo>, amount: u64) -> Result<()> {
         ctx.accounts.mint.decimals,
     )?;
 
+    ctx.accounts.mint.reload()?;
+    require!(
+        ctx.accounts.mint.supply == new_supply,
+        StablecoinError::CounterInvariantViolation
+    );
+
     ctx.accounts.minter_role.minted = minted;
     ctx.accounts.config.total_minted = total_minted;
+
+    emit!(TokensMinted {
+        mint: ctx.accounts.mint.key(),
+        minter: ctx.accounts.minter.key(),
+        destination: ctx.accounts.destination.key(),
+        amount,
+        minter_minted: minted,
+        supply: new_supply,
+    });
 
     Ok(())
 }

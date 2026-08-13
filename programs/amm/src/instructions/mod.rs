@@ -8,7 +8,8 @@ pub use initialize_pool::*;
 pub use remove_liquidity::*;
 pub use swap::*;
 
-use anchor_lang::prelude::*;
+use anchor_lang::{prelude::*, solana_program::program_option::COption};
+use anchor_spl::token_interface::{Mint, TokenAccount};
 use stablecoin::state::MintConfig;
 
 use crate::{constants::MINIMUM_LIQUIDITY, errors::AmmError, state::Pool};
@@ -42,5 +43,47 @@ pub(crate) fn ensure_seeded(pool: &Pool, lp_supply: u64, locked_lp: u64) -> Resu
         locked_lp >= MINIMUM_LIQUIDITY && locked_lp <= lp_supply,
         AmmError::LockedLiquidityInvariant
     );
+    Ok(())
+}
+
+/// The stored addresses are canonical, but the live accounts are re-checked so a
+/// corrupted or externally mutated child can never be used to move value.
+pub(crate) fn ensure_children(
+    pool: &Account<'_, Pool>,
+    vault_a: &InterfaceAccount<'_, TokenAccount>,
+    vault_b: &InterfaceAccount<'_, TokenAccount>,
+    lp_mint: &InterfaceAccount<'_, Mint>,
+) -> Result<()> {
+    let authority = pool.key();
+    require_keys_neq!(vault_a.key(), vault_b.key(), AmmError::DuplicateAccount);
+    require!(
+        vault_a.mint == pool.mint_a && vault_b.mint == pool.mint_b,
+        AmmError::TokenAccountMintMismatch
+    );
+    require!(
+        vault_a.owner == authority && vault_b.owner == authority,
+        AmmError::InvalidTokenOwner
+    );
+    require!(
+        lp_mint.decimals == pool.decimals,
+        AmmError::DecimalsMismatch
+    );
+    require!(
+        lp_mint.mint_authority == COption::Some(authority) && lp_mint.freeze_authority.is_none(),
+        AmmError::InvalidMintAuthority
+    );
+    Ok(())
+}
+
+pub(crate) fn ensure_locked_account(
+    pool: &Account<'_, Pool>,
+    lp_mint: &InterfaceAccount<'_, Mint>,
+    locked_lp: &InterfaceAccount<'_, TokenAccount>,
+) -> Result<()> {
+    require!(
+        locked_lp.mint == lp_mint.key(),
+        AmmError::TokenAccountMintMismatch
+    );
+    require!(locked_lp.owner == pool.key(), AmmError::InvalidTokenOwner);
     Ok(())
 }

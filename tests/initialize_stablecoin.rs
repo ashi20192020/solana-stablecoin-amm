@@ -1,6 +1,9 @@
+mod support;
+
 use anchor_lang::{
-    prelude::Pubkey, solana_program::system_instruction, AccountDeserialize, InstructionData,
-    ToAccountMetas,
+    prelude::Pubkey,
+    solana_program::{program_option::COption, system_instruction},
+    AccountDeserialize, InstructionData, ToAccountMetas,
 };
 use anchor_spl::{
     token_2022::{
@@ -32,6 +35,7 @@ use solana_transaction_error::TransactionError;
 use stablecoin::{
     constants::{CONFIG_SEED, MINT_SEED},
     errors::StablecoinError,
+    events::StablecoinInitialized,
     state::MintConfig,
 };
 
@@ -103,6 +107,15 @@ fn send(
     instructions: &[Instruction],
     extra_signers: &[&Keypair],
 ) -> Result<(), Box<FailedTransactionMetadata>> {
+    send_logs(svm, payer, instructions, extra_signers).map(|_| ())
+}
+
+fn send_logs(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    instructions: &[Instruction],
+    extra_signers: &[&Keypair],
+) -> Result<Vec<String>, Box<FailedTransactionMetadata>> {
     let message =
         Message::new_with_blockhash(instructions, Some(&payer.pubkey()), &svm.latest_blockhash());
     let mut signers = vec![payer];
@@ -111,7 +124,7 @@ fn send(
         .expect("failed to sign transaction");
 
     svm.send_transaction(transaction)
-        .map(|_| ())
+        .map(|meta| meta.logs)
         .map_err(Box::new)
 }
 
@@ -410,4 +423,100 @@ fn invalid_uri_fails() {
             StablecoinError::InvalidUri,
         );
     }
+}
+
+#[test]
+fn initialization_emits_a_typed_event() {
+    let (mut svm, payer) = setup();
+    let instruction = initialize_ix(&payer.pubkey(), SYMBOL, NAME, URI, DECIMALS, SUPPLY_CAP);
+    let logs = send_logs(&mut svm, &payer, &[instruction], &[]).expect("initialization failed");
+
+    let events: Vec<StablecoinInitialized> = support::decode_events(&logs);
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    let mint = mint_pda(&SYMBOL);
+    assert_eq!(event.mint, mint);
+    assert_eq!(event.config, config_pda(&mint));
+    assert_eq!(event.admin, payer.pubkey());
+    assert_eq!(event.symbol, SYMBOL);
+    assert_eq!(event.decimals, DECIMALS);
+    assert_eq!(event.supply_cap, SUPPLY_CAP);
+}
+
+#[test]
+fn a_rejected_initialization_emits_no_event() {
+    let (mut svm, payer) = setup();
+    let instruction = initialize_ix(&payer.pubkey(), SYMBOL, NAME, URI, DECIMALS, 0);
+    let failure = send(&mut svm, &payer, &[instruction], &[])
+        .expect_err("a zero supply cap must be rejected");
+
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            0,
+            InstructionError::Custom(u32::from(StablecoinError::ZeroSupplyCap))
+        )
+    );
+    let events: Vec<StablecoinInitialized> = support::decode_events(&failure.meta.logs);
+    assert!(events.is_empty());
+    assert!(svm.get_account(&config_pda(&mint_pda(&SYMBOL))).is_none());
+}
+
+#[test]
+fn pre_funded_mint_and_config_pdas_are_accepted() {
+    let (mut svm, payer) = setup();
+    let mint = mint_pda(&SYMBOL);
+    let config = config_pda(&mint);
+    // The runtime refuses to leave a modified account below rent exemption, so the
+    // smallest possible squat is the zero-data minimum.
+    let dust = svm.minimum_balance_for_rent_exemption(0);
+    let squats = [
+        system_instruction::transfer(&payer.pubkey(), &mint, dust),
+        system_instruction::transfer(&payer.pubkey(), &config, dust),
+    ];
+    send(&mut svm, &payer, &squats, &[]).expect("pre-funding failed");
+
+    svm.expire_blockhash();
+    let instruction = initialize_ix(&payer.pubkey(), SYMBOL, NAME, URI, DECIMALS, SUPPLY_CAP);
+    send(&mut svm, &payer, &[instruction], &[])
+        .expect("initialization must tolerate pre-funded pdas");
+
+    let mint_account = svm.get_account(&mint).expect("mint missing");
+    assert_eq!(mint_account.owner, TOKEN_2022_ID);
+    assert!(
+        mint_account.lamports >= svm.minimum_balance_for_rent_exemption(mint_account.data.len())
+    );
+    let state =
+        StateWithExtensions::<MintState>::unpack(&mint_account.data).expect("unpack failed");
+    assert_eq!(state.base.decimals, DECIMALS);
+    assert_eq!(state.base.mint_authority, COption::Some(config));
+
+    let config_account = svm.get_account(&config).expect("config missing");
+    assert_eq!(config_account.owner, stablecoin::id());
+    let stored =
+        MintConfig::try_deserialize(&mut config_account.data.as_slice()).expect("config decode");
+    assert_eq!(stored.mint, mint);
+    assert_eq!(stored.supply_cap, SUPPLY_CAP);
+}
+
+#[test]
+fn an_occupied_mint_pda_is_rejected() {
+    let (mut svm, payer) = setup();
+    let mint = mint_pda(&SYMBOL);
+    let mut squatter = svm.get_account(&payer.pubkey()).expect("payer missing");
+    squatter.data = vec![7; 16];
+    squatter.owner = TOKEN_2022_ID;
+    squatter.lamports = svm.minimum_balance_for_rent_exemption(squatter.data.len());
+    svm.set_account(mint, squatter).expect("set_account failed");
+
+    let instruction = initialize_ix(&payer.pubkey(), SYMBOL, NAME, URI, DECIMALS, SUPPLY_CAP);
+    let failure = send(&mut svm, &payer, &[instruction], &[])
+        .expect_err("an occupied mint pda must be rejected");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            0,
+            InstructionError::Custom(u32::from(StablecoinError::MintAccountInUse))
+        )
+    );
 }

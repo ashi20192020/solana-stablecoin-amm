@@ -16,10 +16,6 @@ declare_id!("F8JkSibw1r9bfqj1XGaomozVbTq5YPg7L7zqJWKv7evU");
 pub mod amm {
     use super::*;
 
-    pub fn health_check(_ctx: Context<HealthCheck>) -> Result<()> {
-        Ok(())
-    }
-
     pub fn initialize_pool(ctx: Context<InitializePool>, fee_bps: u16) -> Result<()> {
         instructions::initialize_pool::handler(ctx, fee_bps)
     }
@@ -59,11 +55,4 @@ pub mod amm {
     ) -> Result<()> {
         instructions::swap::handler(ctx, direction, amount_in, min_amount_out)
     }
-}
-
-// Anchor 1.x requires every Accounts struct to bind 'info, so a signer stands in
-// for what would otherwise be an account-free instruction.
-#[derive(Accounts)]
-pub struct HealthCheck<'info> {
-    pub signer: Signer<'info>,
 }

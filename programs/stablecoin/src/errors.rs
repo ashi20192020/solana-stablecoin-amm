@@ -52,4 +52,6 @@ pub enum StablecoinError {
     InvalidPendingAdmin,
     #[msg("signer is not the pending admin")]
     NoPendingAdmin,
+    #[msg("canonical mint account is already in use")]
+    MintAccountInUse,
 }

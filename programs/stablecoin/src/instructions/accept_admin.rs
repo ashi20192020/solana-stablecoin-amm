@@ -1,6 +1,8 @@
 use anchor_lang::prelude::*;
 
-use crate::{constants::CONFIG_SEED, errors::StablecoinError, state::MintConfig};
+use crate::{
+    constants::CONFIG_SEED, errors::StablecoinError, events::AdminAccepted, state::MintConfig,
+};
 
 #[derive(Accounts)]
 pub struct AcceptAdmin<'info> {
@@ -19,8 +21,15 @@ pub struct AcceptAdmin<'info> {
 pub(crate) fn handler(ctx: Context<AcceptAdmin>) -> Result<()> {
     let admin = ctx.accounts.pending_admin.key();
     let config = &mut ctx.accounts.config;
+    let previous_admin = config.admin;
     config.admin = admin;
     config.pending_admin = None;
+
+    emit!(AdminAccepted {
+        mint: config.mint,
+        previous_admin,
+        admin,
+    });
 
     Ok(())
 }

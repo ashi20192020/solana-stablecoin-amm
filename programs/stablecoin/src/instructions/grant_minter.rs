@@ -3,6 +3,7 @@ use anchor_lang::prelude::*;
 use crate::{
     constants::{CONFIG_SEED, MINTER_SEED},
     errors::StablecoinError,
+    events::MinterGranted,
     state::{MintConfig, MinterRole},
 };
 
@@ -43,13 +44,20 @@ pub(crate) fn handler(ctx: Context<GrantMinter>, allowance: u64) -> Result<()> {
         StablecoinError::InvalidAuthority
     );
 
+    let config = ctx.accounts.config.key();
     ctx.accounts.minter_role.set_inner(MinterRole {
-        config: ctx.accounts.config.key(),
+        config,
         authority,
         allowance,
         minted: 0,
         bump: ctx.bumps.minter_role,
         _reserved: [0; 32],
+    });
+
+    emit!(MinterGranted {
+        config,
+        authority,
+        allowance,
     });
 
     Ok(())

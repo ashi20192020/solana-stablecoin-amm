@@ -4,6 +4,7 @@ use anchor_spl::{token_2022::Token2022, token_interface::Mint};
 use crate::{
     constants::CONFIG_SEED,
     errors::StablecoinError,
+    events::PauseChanged,
     state::MintConfig,
     token2022::{pausable_is_paused, pausable_set},
 };
@@ -53,6 +54,12 @@ pub(crate) fn handler(ctx: Context<SetPause>, paused: bool) -> Result<()> {
         StablecoinError::PauseStateDrift
     );
     ctx.accounts.config.paused = paused;
+
+    emit!(PauseChanged {
+        mint: ctx.accounts.mint.key(),
+        authority: ctx.accounts.authority.key(),
+        paused,
+    });
 
     Ok(())
 }

@@ -14,6 +14,7 @@ use anchor_spl::{
 use crate::{
     constants::{CONFIG_SEED, POLICY_SEED},
     errors::StablecoinError,
+    events::WalletPolicyChanged,
     state::{MintConfig, PolicyStatus, WalletPolicy},
 };
 
@@ -95,15 +96,29 @@ pub(crate) fn handler(ctx: Context<SetWalletPolicy>, status: PolicyStatus) -> Re
     );
 
     let bump = ctx.bumps.wallet_policy;
+    let mint = ctx.accounts.mint.key();
+    let account = ctx.accounts.token_account.key();
+    let owner = ctx.accounts.token_account.owner;
+    let updated_by = ctx.accounts.compliance_authority.key();
+    let updated_at = Clock::get()?.unix_timestamp;
     ctx.accounts.wallet_policy.set_inner(WalletPolicy {
-        mint: ctx.accounts.mint.key(),
-        token_account: ctx.accounts.token_account.key(),
-        owner: ctx.accounts.token_account.owner,
+        mint,
+        token_account: account,
+        owner,
         status,
-        updated_at: Clock::get()?.unix_timestamp,
-        updated_by: ctx.accounts.compliance_authority.key(),
+        updated_at,
+        updated_by,
         bump,
         _reserved: [0; 32],
+    });
+
+    emit!(WalletPolicyChanged {
+        mint,
+        token_account: account,
+        owner,
+        status,
+        updated_by,
+        updated_at,
     });
 
     Ok(())

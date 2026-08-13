@@ -1,3 +1,5 @@
+mod support;
+
 use anchor_lang::{
     error::ErrorCode as AnchorError, prelude::Pubkey, solana_program::system_instruction,
     AccountDeserialize, AccountSerialize, InstructionData, ToAccountMetas,
@@ -28,6 +30,7 @@ use solana_transaction_error::TransactionError;
 use stablecoin::{
     constants::{CONFIG_SEED, MAX_SUPPLY_CAP, MINTER_SEED, MINT_SEED, POLICY_SEED},
     errors::StablecoinError,
+    events::{AdminAccepted, ConfigUpdated, PauseChanged},
     state::{MintConfig, PolicyStatus},
 };
 
@@ -171,6 +174,7 @@ struct Env {
     admin: Keypair,
     mint: Pubkey,
     config: Pubkey,
+    logs: Vec<String>,
 }
 
 impl Env {
@@ -189,6 +193,7 @@ impl Env {
             admin,
             mint,
             config: config_pda(&mint),
+            logs: Vec::new(),
         };
         let instruction = initialize_ix(&env.admin.pubkey(), SYMBOL, SUPPLY_CAP);
         env.send(&[instruction], &[])
@@ -216,10 +221,21 @@ impl Env {
             VersionedTransaction::try_new(VersionedMessage::Legacy(message), &signers)
                 .expect("failed to sign transaction");
 
-        self.svm
-            .send_transaction(transaction)
-            .map(|_| ())
-            .map_err(Box::new)
+        self.logs.clear();
+        match self.svm.send_transaction(transaction) {
+            Ok(meta) => {
+                self.logs = meta.logs;
+                Ok(())
+            }
+            Err(failure) => {
+                self.logs = failure.meta.logs.clone();
+                Err(Box::new(failure))
+            }
+        }
+    }
+
+    fn events<E: anchor_lang::Discriminator + anchor_lang::AnchorDeserialize>(&self) -> Vec<E> {
+        support::decode_events(&self.logs)
     }
 
     fn funded_keypair(&mut self) -> Keypair {
@@ -958,4 +974,54 @@ fn accept_admin_rejects_a_substituted_config() {
         env.send(&[not_a_config], &[&nominee]),
         AnchorError::AccountOwnedByWrongProgram,
     );
+}
+
+#[test]
+fn pause_config_and_admin_changes_emit_typed_events() {
+    let mut env = Env::new();
+
+    env.pause(true).expect("pause failed");
+    let paused: Vec<PauseChanged> = env.events();
+    assert_eq!(paused.len(), 1);
+    assert_eq!(paused[0].mint, env.mint);
+    assert_eq!(paused[0].authority, env.admin.pubkey());
+    assert!(paused[0].paused);
+
+    let compliance = Keypair::new();
+    let successor = env.funded_keypair();
+    env.update(
+        Some(SUPPLY_CAP / 2),
+        Some(compliance.pubkey()),
+        Some(successor.pubkey()),
+    )
+    .expect("update failed");
+    let updated: Vec<ConfigUpdated> = env.events();
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].mint, env.mint);
+    assert_eq!(updated[0].admin, env.admin.pubkey());
+    assert_eq!(updated[0].supply_cap, SUPPLY_CAP / 2);
+    assert_eq!(updated[0].compliance_authority, compliance.pubkey());
+    assert_eq!(updated[0].pending_admin, Some(successor.pubkey()));
+
+    let previous_admin = env.admin.pubkey();
+    env.accept_admin(&successor).expect("accept failed");
+    let accepted: Vec<AdminAccepted> = env.events();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0].mint, env.mint);
+    assert_eq!(accepted[0].previous_admin, previous_admin);
+    assert_eq!(accepted[0].admin, successor.pubkey());
+}
+
+#[test]
+fn a_rejected_pause_emits_no_event_and_changes_nothing() {
+    let mut env = Env::new();
+    let intruder = env.funded_keypair();
+
+    let before = env.config_state();
+    expect_error(env.pause_as(&intruder, true), StablecoinError::Unauthorized);
+
+    let events: Vec<PauseChanged> = env.events();
+    assert!(events.is_empty());
+    assert_eq!(env.config_state().paused, before.paused);
+    assert!(!bool::from(env.pausable(&env.mint).paused));
 }

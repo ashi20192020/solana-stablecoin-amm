@@ -15,6 +15,10 @@ env:
   CARGO_TERM_COLOR: always
   ANCHOR_VERSION: 1.1.2
   SOLANA_VERSION: 3.1.10
+  LLVM_COV_VERSION: 0.8.7
+  # math.rs is fully covered apart from provably unreachable `checked_*` arms and the
+  # panic branches of passing assertions, so the floor sits just below 100%.
+  MATH_LINE_COVERAGE_FLOOR: 97
 
 jobs:
   build-and-test:
@@ -23,7 +27,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools-preview
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -71,3 +77,40 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-features
+
+      - name: Install cargo-llvm-cov
+        run: |
+          if [ "$(cargo llvm-cov --version 2>/dev/null)" != "cargo-llvm-cov ${LLVM_COV_VERSION}" ]; then
+            cargo install cargo-llvm-cov --version "${LLVM_COV_VERSION}" --locked --force
+          fi
+
+      # Focused on the pure math module; Anchor-generated and integration code is covered
+      # by the LiteSVM suites instead.
+      - name: Coverage (math.rs)
+        run: |
+          cargo llvm-cov --package amm --lib --all-features \
+            --json --output-path math-coverage.json
+          jq -e --argjson floor "${MATH_LINE_COVERAGE_FLOOR}" '
+            .data[0].files[]
+            | select(.filename | endswith("/programs/amm/src/math.rs"))
+            | .summary
+            | if .functions.percent < 100 then
+                error("math.rs function coverage \(.functions.percent)% is below 100%")
+              elif .lines.percent < $floor then
+                error("math.rs line coverage \(.lines.percent)% is below \($floor)%")
+              else
+                "math.rs lines \(.lines.percent)% functions \(.functions.percent)%"
+              end
+          ' math-coverage.json
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: scripts/package.json
+          cache: npm
+          cache-dependency-path: scripts/package-lock.json
+
+      - name: Install demo client
+        run: npm --prefix scripts ci
+
+      - name: Typecheck demo client
+        run: npm --prefix scripts run typecheck

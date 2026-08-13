@@ -4,7 +4,9 @@ use anchor_spl::{
     token_interface::{Mint, TokenAccount},
 };
 
-use crate::{constants::CONFIG_SEED, errors::StablecoinError, state::MintConfig};
+use crate::{
+    constants::CONFIG_SEED, errors::StablecoinError, events::TokensBurned, state::MintConfig,
+};
 
 #[derive(Accounts)]
 pub struct Burn<'info> {
@@ -61,7 +63,25 @@ pub(crate) fn handler(ctx: Context<Burn>, amount: u64) -> Result<()> {
         ctx.accounts.mint.decimals,
     )?;
 
+    // Computed after the CPI so Token-2022 keeps reporting insufficient balances itself.
+    let new_supply = supply
+        .checked_sub(amount)
+        .ok_or(StablecoinError::MathOverflow)?;
+    ctx.accounts.mint.reload()?;
+    require!(
+        ctx.accounts.mint.supply == new_supply,
+        StablecoinError::CounterInvariantViolation
+    );
+
     ctx.accounts.config.total_burned = total_burned;
+
+    emit!(TokensBurned {
+        mint: ctx.accounts.mint.key(),
+        owner: ctx.accounts.owner.key(),
+        source: ctx.accounts.source.key(),
+        amount,
+        supply: new_supply,
+    });
 
     Ok(())
 }

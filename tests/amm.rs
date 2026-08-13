@@ -639,6 +639,22 @@ impl Env {
             .base
     }
 
+    /// Copies a foreign account's contents onto a canonical PDA address. The addresses
+    /// are program-derived, so corrupting the live account is the only way to reach the
+    /// runtime child-account checks.
+    fn overwrite(&mut self, target: Pubkey, source: Pubkey) {
+        let source = self.svm.get_account(&source).expect("source missing");
+        let mut account = self.svm.get_account(&target).expect("target missing");
+        account.lamports = self
+            .svm
+            .minimum_balance_for_rent_exemption(source.data.len());
+        account.data = source.data;
+        account.owner = source.owner;
+        self.svm
+            .set_account(target, account)
+            .expect("set_account failed");
+    }
+
     fn create_raw_mint(&mut self, decimals: u8, transfer_fee: bool) -> Pubkey {
         let mint = Keypair::new();
         let extensions: &[ExtensionType] = if transfer_fee {
@@ -1750,4 +1766,115 @@ fn an_occupied_child_pda_is_rejected() {
         .expect("set_account failed");
 
     expect_error(env.init_pool(FEE_BPS), AmmError::ChildAccountInUse);
+}
+
+#[test]
+fn a_vault_holding_the_wrong_mint_is_rejected() {
+    let (mut env, user) = Env::seeded(FEE_BPS);
+    let (pool, mint_b, vault_a) = (env.pool, env.mint_b, env.vault_a);
+    let impostor = env.create_token_account(&pool, &mint_b);
+    env.overwrite(vault_a, impostor);
+
+    expect_error(
+        env.swap(&user, SwapDirection::AtoB, 10_000, 0),
+        AmmError::TokenAccountMintMismatch,
+    );
+}
+
+#[test]
+fn a_vault_owned_by_an_outsider_is_rejected() {
+    let (mut env, user) = Env::seeded(FEE_BPS);
+    let (outsider, mint_a, vault_a) = (user.keypair.pubkey(), env.mint_a, env.vault_a);
+    let impostor = env.create_token_account(&outsider, &mint_a);
+    env.overwrite(vault_a, impostor);
+
+    expect_error(
+        env.swap(&user, SwapDirection::AtoB, 10_000, 0),
+        AmmError::InvalidTokenOwner,
+    );
+}
+
+#[test]
+fn an_lp_mint_with_foreign_decimals_is_rejected() {
+    let (mut env, user) = Env::seeded(FEE_BPS);
+    let lp_mint = env.lp_mint;
+    let impostor = env.create_raw_mint(DECIMALS + 1, false);
+    env.overwrite(lp_mint, impostor);
+
+    expect_error(
+        env.swap(&user, SwapDirection::AtoB, 10_000, 0),
+        AmmError::DecimalsMismatch,
+    );
+}
+
+#[test]
+fn an_lp_mint_with_a_foreign_authority_is_rejected() {
+    let (mut env, user) = Env::seeded(FEE_BPS);
+    let lp_mint = env.lp_mint;
+    let impostor = env.create_raw_mint(DECIMALS, false);
+    env.overwrite(lp_mint, impostor);
+
+    expect_error(
+        env.swap(&user, SwapDirection::AtoB, 10_000, 0),
+        AmmError::InvalidMintAuthority,
+    );
+}
+
+#[test]
+fn an_lp_mint_carrying_a_freeze_authority_is_rejected() {
+    let (mut env, user) = Env::seeded(FEE_BPS);
+    let (pool, lp_mint) = (env.pool, env.lp_mint);
+    let impostor = Keypair::new();
+    let space = ExtensionType::try_calculate_account_len::<MintState>(&[])
+        .expect("mint length calculation failed");
+    let create = system_instruction::create_account(
+        &env.admin.pubkey(),
+        &impostor.pubkey(),
+        env.svm.minimum_balance_for_rent_exemption(space),
+        space as u64,
+        &TOKEN_2022_ID,
+    );
+    let initialize = initialize_mint2(
+        &TOKEN_2022_ID,
+        &impostor.pubkey(),
+        &pool,
+        Some(&pool),
+        DECIMALS,
+    )
+    .expect("initialize_mint2 build failed");
+    env.send(&[create, initialize], &[&impostor])
+        .expect("impostor mint creation failed");
+    let impostor = impostor.pubkey();
+    env.overwrite(lp_mint, impostor);
+
+    expect_error(
+        env.swap(&user, SwapDirection::AtoB, 10_000, 0),
+        AmmError::InvalidMintAuthority,
+    );
+}
+
+#[test]
+fn a_locked_account_holding_the_wrong_mint_is_rejected() {
+    let (mut env, user) = Env::seeded(FEE_BPS);
+    let (pool, mint_a, locked_lp) = (env.pool, env.mint_a, env.locked_lp);
+    let impostor = env.create_token_account(&pool, &mint_a);
+    env.overwrite(locked_lp, impostor);
+
+    expect_error(
+        env.remove_liquidity(&user, 1_000, 0, 0),
+        AmmError::TokenAccountMintMismatch,
+    );
+}
+
+#[test]
+fn a_locked_account_owned_by_an_outsider_is_rejected() {
+    let (mut env, user) = Env::seeded(FEE_BPS);
+    let (outsider, lp_mint, locked_lp) = (user.keypair.pubkey(), env.lp_mint, env.locked_lp);
+    let impostor = env.create_token_account(&outsider, &lp_mint);
+    env.overwrite(locked_lp, impostor);
+
+    expect_error(
+        env.remove_liquidity(&user, 1_000, 0, 0),
+        AmmError::InvalidTokenOwner,
+    );
 }

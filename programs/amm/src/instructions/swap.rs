@@ -12,7 +12,7 @@ use crate::{
     constants::POOL_SEED,
     errors::AmmError,
     events::SwapExecuted,
-    instructions::{ensure_solvent, ensure_unpaused},
+    instructions::{ensure_children, ensure_solvent, ensure_unpaused},
     math::quote_swap,
     state::{Pool, SwapDirection},
 };
@@ -109,6 +109,12 @@ pub(crate) fn handler(
 ) -> Result<()> {
     require!(amount_in > 0, AmmError::ZeroAmount);
     ensure_unpaused(&ctx.accounts.config_a, &ctx.accounts.config_b)?;
+    ensure_children(
+        &ctx.accounts.pool,
+        &ctx.accounts.vault_a,
+        &ctx.accounts.vault_b,
+        &ctx.accounts.lp_mint,
+    )?;
 
     let pool = &ctx.accounts.pool;
     ensure_solvent(

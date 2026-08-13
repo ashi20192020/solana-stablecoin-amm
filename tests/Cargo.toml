@@ -14,8 +14,8 @@ name = "amm"
 path = "amm.rs"
 
 [[test]]
-name = "health_check"
-path = "health_check.rs"
+name = "invariants"
+path = "invariants.rs"
 
 [[test]]
 name = "initialize_stablecoin"

@@ -12,7 +12,9 @@ use crate::{
     constants::POOL_SEED,
     errors::AmmError,
     events::LiquidityRemoved,
-    instructions::{ensure_seeded, ensure_solvent, ensure_unpaused},
+    instructions::{
+        ensure_children, ensure_locked_account, ensure_seeded, ensure_solvent, ensure_unpaused,
+    },
     math::quote_remove_liquidity,
     state::Pool,
 };
@@ -122,6 +124,17 @@ pub(crate) fn handler(
 ) -> Result<()> {
     require!(lp_amount > 0, AmmError::ZeroAmount);
     ensure_unpaused(&ctx.accounts.config_a, &ctx.accounts.config_b)?;
+    ensure_children(
+        &ctx.accounts.pool,
+        &ctx.accounts.vault_a,
+        &ctx.accounts.vault_b,
+        &ctx.accounts.lp_mint,
+    )?;
+    ensure_locked_account(
+        &ctx.accounts.pool,
+        &ctx.accounts.lp_mint,
+        &ctx.accounts.locked_lp,
+    )?;
 
     let pool = &ctx.accounts.pool;
     ensure_solvent(
